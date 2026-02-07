@@ -64,7 +64,8 @@ def create_app():
             tc_count = len(msg.get('tool_calls', []))
             tc_id = msg.get('tool_call_id', '')
             if isinstance(content, list):
-                content_info = f'list[{len(content)}]'
+                types = [p.get('type','?') if isinstance(p,dict) else 'str' for p in content]
+                content_info = f'list[{len(content)}] types={types}'
             elif isinstance(content, str):
                 content_info = f'str[{len(content)}]'
             elif content is None:
