@@ -105,7 +105,7 @@ def openai_to_anthropic_request(payload):
     result = {
         'model': payload.get('model', 'claude-sonnet-4-20250514'),
         'messages': anthropic_messages,
-        'max_tokens': payload.get('max_tokens') or 8192,
+        'max_tokens': max(payload.get('max_tokens') or 8192, 8192),
     }
 
     if system_parts:
@@ -296,6 +296,8 @@ def init_stream_state(request_id):
         'tool_buf': '',
         'current_tool_id': None,
         'current_tool_name': None,
+        'input_tokens': 0,
+        'output_tokens': 0,
     }
 
 
@@ -316,8 +318,11 @@ def anthropic_to_openai_stream_chunk(event_type, event_data, request_id):
     chunks = []
 
     if event_type == 'message_start':
+        message = event_data.get('message', {})
+        usage = message.get('usage', {})
+        state['input_tokens'] = usage.get('input_tokens', 0)
         chunk = _make_stream_chunk(request_id, delta={'role': 'assistant', 'content': ''})
-        model = event_data.get('message', {}).get('model')
+        model = message.get('model')
         if model:
             chunk['model'] = model
         chunks.append(json.dumps(chunk))
@@ -376,7 +381,14 @@ def anthropic_to_openai_stream_chunk(event_type, event_data, request_id):
         delta = event_data.get('delta', {})
         stop_reason = delta.get('stop_reason', '')
         finish_reason = STOP_REASON_MAP.get(stop_reason, 'stop')
+        usage = event_data.get('usage', {})
+        state['output_tokens'] = usage.get('output_tokens', 0)
         chunk = _make_stream_chunk(request_id, delta={}, finish_reason=finish_reason)
+        chunk['usage'] = {
+            'prompt_tokens': state.get('input_tokens', 0),
+            'completion_tokens': state['output_tokens'],
+            'total_tokens': state.get('input_tokens', 0) + state['output_tokens'],
+        }
         chunks.append(json.dumps(chunk))
 
     elif event_type == 'message_stop':
