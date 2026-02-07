@@ -90,6 +90,10 @@ def openai_to_anthropic_request(payload):
             }]
             anthropic_role = 'user'
 
+        # 跳过空 content 的消息
+        if not anthropic_content or anthropic_content == [] or anthropic_content == '':
+            continue
+
         anthropic_messages.append({
             'role': anthropic_role,
             'content': anthropic_content,
