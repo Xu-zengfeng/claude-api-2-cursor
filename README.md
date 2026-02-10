@@ -120,6 +120,7 @@ python start.py
 在 Cursor 设置中：
 - **Base URL**: `http://[你的服务器 IP]:3029` 或 `http://[你的域名]/v1`
 - **API Key**: 填写 `ACCESS_API_KEY` 的值
+- **添加自定义模型**: 建议跟claude code官方模型一致，如 `claude-sonnet-4-5-20250929`
 
 注意，Cursor 的 Base URL 不能是 `localhost`、`127.0.0.1` 等本地地址，需要是你的服务器 IP 或域名。如果想本地部署，可以结合内网穿透工具使用（如花生壳、ngrok、frp 等），将本地服务映射到公网地址。
 
@@ -166,3 +167,7 @@ docker compose down
 服务会根据 `PROXY_API_KEY` 的前缀自动选择注入方式：
 - `sk-` 开头 → `x-api-key` 请求头
 - 其他 → `Authorization: Bearer` 请求头
+
+## 踩坑点和建议
+**cursor对模型名的玄学**
+  与其说是玄学，实际上也是我还没搞清楚原理。表现的话，即使cursor的自定义api是配置在openai格式下，但你添加不同的模型名，cursor真可能发起不同格式的请求。所以按经验来说，模型名就用上面建议的 `claude-sonnet-4-5-20250929`，这个用起来目前倒没什么问题，别用opus的，我试了几次都不行，抓请求看，cursor发起的请求跟sonnet的不一样
