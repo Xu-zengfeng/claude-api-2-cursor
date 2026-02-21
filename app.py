@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 MODEL_MAP = {
     'claude-4.6-sonnet-medium-thinking': 'claude-sonnet-4-6',
     'claude-4.6-sonnet-medium': 'claude-sonnet-4-6',
+    'claude-4.6-opus-high-thinking': 'claude-opus-4-6',
 }
 
 
