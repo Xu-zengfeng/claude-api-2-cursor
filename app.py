@@ -17,6 +17,17 @@ from openai_adapter import (
 logger = logging.getLogger(__name__)
 
 
+def _log_request_exception(tag, e):
+    """请求失败时打印完整错误：异常信息、堆栈、以及上游响应体（若有）"""
+    logger.error('%s request error: %s', tag, e, exc_info=True)
+    if getattr(e, 'response', None) is not None:
+        try:
+            body = e.response.content.decode('utf-8', errors='replace')
+            logger.error('%s upstream response %s: %s', tag, e.response.status_code, body)
+        except Exception:
+            logger.error('%s upstream response %s: (body decode failed)', tag, e.response.status_code)
+
+
 def create_app():
     app = Flask(__name__)
     CORS(app)
@@ -133,7 +144,7 @@ def create_app():
                     content_type=resp.headers.get('Content-Type', 'application/json'),
                 )
         except requests.RequestException as e:
-            logger.error(f'[passthrough] request error: {e}')
+            _log_request_exception('[passthrough]', e)
             return jsonify({'error': {'message': str(e), 'type': 'proxy_error'}}), 502
 
     def _handle_non_stream(target_url, headers, anthropic_payload):
@@ -147,7 +158,8 @@ def create_app():
             )
 
             if resp.status_code != 200:
-                logger.warning(f'[chat] upstream error {resp.status_code}')
+                error_body = resp.content.decode('utf-8', errors='replace')
+                logger.warning(f'[chat] upstream error {resp.status_code}: %s', error_body)
                 return Response(
                     resp.content,
                     status=resp.status_code,
@@ -161,7 +173,7 @@ def create_app():
             return jsonify(openai_response)
 
         except requests.RequestException as e:
-            logger.error(f'[chat] request error: {e}')
+            _log_request_exception('[chat]', e)
             return jsonify({'error': {'message': str(e), 'type': 'proxy_error'}}), 502
 
     def _handle_stream(target_url, headers, anthropic_payload):
@@ -182,7 +194,7 @@ def create_app():
 
                 if resp.status_code != 200:
                     error_body = resp.content.decode('utf-8', errors='replace')
-                    logger.warning(f'[stream] upstream error {resp.status_code}: {error_body[:200]}')
+                    logger.warning(f'[stream] upstream error {resp.status_code}: %s', error_body)
                     error_chunk = json.dumps({
                         'error': {
                             'message': f'Upstream error {resp.status_code}: {error_body}',
@@ -224,7 +236,7 @@ def create_app():
                 yield 'data: [DONE]\n\n'
 
             except requests.RequestException as e:
-                logger.error(f'[stream] request error: {e}')
+                _log_request_exception('[stream]', e)
                 error_chunk = json.dumps({
                     'error': {'message': str(e), 'type': 'proxy_error'}
                 })
