@@ -103,7 +103,7 @@ def openai_to_anthropic_request(payload):
     anthropic_messages = _merge_consecutive_roles(anthropic_messages)
 
     result = {
-        'model': payload.get('model', 'claude-sonnet-4-20250514'),
+        'model': payload.get('model', 'claude-sonnet-4-6'),
         'messages': anthropic_messages,
         'max_tokens': max(payload.get('max_tokens') or 8192, 8192),
     }
