@@ -16,6 +16,11 @@ if __name__ == '__main__':
     app = create_app()
     print(f'Proxy service starting on 0.0.0.0:{Config.PROXY_PORT}')
     print(f'Target: {Config.PROXY_TARGET_URL}')
+    # 启动时检查环境变量是否读到了（便于排查上游 503 no available accounts）
+    key_ok = bool(Config.PROXY_API_KEY and Config.PROXY_API_KEY.strip())
+    print(f'PROXY_API_KEY: {"✓ set" if key_ok else "✗ missing or empty"}')
+    if not key_ok:
+        print('WARNING: PROXY_API_KEY is empty. Requests to upstream may fail.')
 
     from waitress import serve
     serve(
