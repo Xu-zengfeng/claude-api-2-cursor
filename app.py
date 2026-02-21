@@ -9,17 +9,14 @@ from config import Config
 from openai_adapter import (
     anthropic_to_openai_response,
     anthropic_to_openai_stream_chunk,
-    responses_to_openai_response,
-    responses_to_openai_stream_chunk,
     init_stream_state,
     cleanup_stream_state,
     openai_to_anthropic_request,
-    openai_chat_to_responses_request,
 )
 
 logger = logging.getLogger(__name__)
 
-# Cursor 模型名映射
+# Cursor 模型名 → Anthropic 模型名 映射
 MODEL_MAP = {
     'claude-4.6-sonnet-medium-thinking': 'claude-sonnet-4-6',
     'claude-4.6-sonnet-medium': 'claude-sonnet-4-6',
@@ -36,15 +33,6 @@ def _log_request_exception(tag, e):
             logger.error('%s upstream response %s: %s', tag, e.response.status_code, body)
         except Exception:
             logger.error('%s upstream response %s: (body decode failed)', tag, e.response.status_code)
-
-
-def _use_responses_protocol(model):
-    """根据模型名判断是否走 /v1/responses 协议"""
-    if not model:
-        return False
-    m = model.lower()
-    # Codex / GPT / O 系列统一走 Responses
-    return m.startswith('gpt-') or m.startswith('o')
 
 
 def create_app():
@@ -74,11 +62,7 @@ def create_app():
 
     @app.route('/health', methods=['GET'])
     def health():
-        return jsonify({
-            'status': 'ok',
-            'target': Config.PROXY_TARGET_URL,
-            'codex_target': Config.CODEX_BASE_URL or Config.PROXY_TARGET_URL,
-        })
+        return jsonify({'status': 'ok', 'target': Config.PROXY_TARGET_URL})
 
     @app.route('/v1/chat/completions', methods=['POST'])
     def chat_completions():
@@ -119,33 +103,22 @@ def create_app():
             payload = {**payload, 'model': MODEL_MAP[model]}
             logger.info(f'[chat] model mapped: {model} -> {payload["model"]}')
 
-        if _use_responses_protocol(payload.get('model', '')):
-            logger.info('[chat] protocol=responses')
-            responses_payload = openai_chat_to_responses_request(payload)
-            logger.debug(f'[chat] responses_payload: {json.dumps(responses_payload, ensure_ascii=False)}')
-
-            headers = _prepare_codex_headers()
-            target_url = f'{(Config.CODEX_BASE_URL or Config.PROXY_TARGET_URL).rstrip("/")}/v1/responses'
-
-            if is_stream:
-                responses_payload['stream'] = True
-                return _handle_responses_stream(target_url, headers, responses_payload)
-            responses_payload['stream'] = False
-            return _handle_responses_non_stream(target_url, headers, responses_payload)
-
-        logger.info('[chat] protocol=anthropic_messages')
+        # 转换请求
         anthropic_payload = openai_to_anthropic_request(payload)
         logger.debug(f'[chat] anthropic_payload: {json.dumps(anthropic_payload, ensure_ascii=False)}')
 
+        # 准备请求头
         headers = _prepare_headers()
         headers['Content-Type'] = 'application/json'
+
         target_url = f'{Config.PROXY_TARGET_URL.rstrip("/")}/v1/messages'
 
         if is_stream:
             anthropic_payload['stream'] = True
-            return _handle_anthropic_stream(target_url, headers, anthropic_payload)
-        anthropic_payload['stream'] = False
-        return _handle_anthropic_non_stream(target_url, headers, anthropic_payload)
+            return _handle_stream(target_url, headers, anthropic_payload)
+        else:
+            anthropic_payload['stream'] = False
+            return _handle_non_stream(target_url, headers, anthropic_payload)
 
     @app.route('/v1/messages', methods=['POST'])
     def messages_passthrough():
@@ -187,8 +160,8 @@ def create_app():
             _log_request_exception('[passthrough]', e)
             return jsonify({'error': {'message': str(e), 'type': 'proxy_error'}}), 502
 
-    def _handle_anthropic_non_stream(target_url, headers, anthropic_payload):
-        """处理 Anthropic 非流式请求"""
+    def _handle_non_stream(target_url, headers, anthropic_payload):
+        """处理非流式请求"""
         try:
             resp = requests.post(
                 target_url,
@@ -216,8 +189,8 @@ def create_app():
             _log_request_exception('[chat]', e)
             return jsonify({'error': {'message': str(e), 'type': 'proxy_error'}}), 502
 
-    def _handle_anthropic_stream(target_url, headers, anthropic_payload):
-        """处理 Anthropic 流式请求"""
+    def _handle_stream(target_url, headers, anthropic_payload):
+        """处理流式请求"""
         request_id = f'chatcmpl-stream-{id(request)}'
 
         def generate():
@@ -262,103 +235,14 @@ def create_app():
                         except json.JSONDecodeError:
                             continue
 
-                        chunks = anthropic_to_openai_stream_chunk(event_type, event_data, request_id)
-                        for chunk_str in chunks:
-                            yield f'data: {chunk_str}\n\n'
+                        logger.debug(f'[stream] event={event_type} data_keys={list(event_data.keys()) if isinstance(event_data, dict) else "?"}')
+                        if event_type == 'content_block_start':
+                            block = event_data.get('content_block', {})
+                            logger.info(f'[stream] content_block_start type={block.get("type")} name={block.get("name", "")}')
 
-                yield 'data: [DONE]\n\n'
-
-            except requests.RequestException as e:
-                _log_request_exception('[stream]', e)
-                error_chunk = json.dumps({
-                    'error': {'message': str(e), 'type': 'proxy_error'}
-                })
-                yield f'data: {error_chunk}\n\n'
-            finally:
-                cleanup_stream_state(request_id)
-
-        return Response(
-            generate(),
-            content_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'X-Accel-Buffering': 'no',
-            },
-        )
-
-    def _handle_responses_non_stream(target_url, headers, responses_payload):
-        """处理 Responses 非流式请求"""
-        try:
-            resp = requests.post(
-                target_url,
-                headers=headers,
-                json=responses_payload,
-                timeout=Config.API_TIMEOUT,
-            )
-
-            if resp.status_code != 200:
-                error_body = resp.content.decode('utf-8', errors='replace')
-                logger.warning(f'[chat] upstream error {resp.status_code}: %s', error_body)
-                return Response(
-                    resp.content,
-                    status=resp.status_code,
-                    content_type=resp.headers.get('Content-Type', 'application/json'),
-                )
-
-            response_data = resp.json()
-            openai_response = responses_to_openai_response(response_data)
-            usage = openai_response.get('usage', {})
-            logger.info(f'[chat] done prompt={usage.get("prompt_tokens", 0)} completion={usage.get("completion_tokens", 0)}')
-            return jsonify(openai_response)
-
-        except requests.RequestException as e:
-            _log_request_exception('[chat]', e)
-            return jsonify({'error': {'message': str(e), 'type': 'proxy_error'}}), 502
-
-    def _handle_responses_stream(target_url, headers, responses_payload):
-        """处理 Responses 流式请求"""
-        request_id = f'chatcmpl-stream-{id(request)}'
-
-        def generate():
-            init_stream_state(request_id)
-            try:
-                resp = requests.post(
-                    target_url,
-                    headers=headers,
-                    json=responses_payload,
-                    timeout=Config.API_TIMEOUT,
-                    stream=True,
-                )
-
-                if resp.status_code != 200:
-                    error_body = resp.content.decode('utf-8', errors='replace')
-                    logger.warning(f'[stream] upstream error {resp.status_code}: %s', error_body)
-                    error_chunk = json.dumps({
-                        'error': {
-                            'message': f'Upstream error {resp.status_code}: {error_body}',
-                            'type': 'upstream_error',
-                        }
-                    })
-                    yield f'data: {error_chunk}\n\n'
-                    return
-
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    decoded = line.decode('utf-8', errors='replace')
-
-                    if decoded.startswith('data:'):
-                        data_str = decoded[5:].strip()
-                        if not data_str:
-                            continue
-                        if data_str == '[DONE]':
-                            break
-                        try:
-                            event_data = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-
-                        chunks = responses_to_openai_stream_chunk(event_data, request_id)
+                        chunks = anthropic_to_openai_stream_chunk(
+                            event_type, event_data, request_id
+                        )
                         for chunk_str in chunks:
                             yield f'data: {chunk_str}\n\n'
 
@@ -394,16 +278,5 @@ def _prepare_headers():
     if key.startswith('sk-'):
         headers['x-api-key'] = key
     else:
-        headers['Authorization'] = f'Bearer {key}'
-    return headers
-
-
-def _prepare_codex_headers():
-    """准备 Codex /responses 请求头"""
-    key = Config.CODEX_API_KEY or Config.PROXY_API_KEY
-    headers = {
-        'Content-Type': 'application/json',
-    }
-    if key:
         headers['Authorization'] = f'Bearer {key}'
     return headers
