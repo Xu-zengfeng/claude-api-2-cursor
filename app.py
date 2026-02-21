@@ -124,18 +124,6 @@ def create_app():
             responses_payload = openai_chat_to_responses_request(payload)
             logger.debug(f'[chat] responses_payload: {json.dumps(responses_payload, ensure_ascii=False)}')
 
-            if (
-                not responses_payload.get('input')
-                and not responses_payload.get('prompt')
-                and not responses_payload.get('conversation_id')
-            ):
-                return jsonify({
-                    'error': {
-                        'message': 'Missing input: provide messages/input/prompt/conversation_id',
-                        'type': 'invalid_request_error',
-                    }
-                }), 400
-
             headers = _prepare_codex_headers()
             target_url = f'{(Config.CODEX_BASE_URL or Config.PROXY_TARGET_URL).rstrip("/")}/v1/responses'
 

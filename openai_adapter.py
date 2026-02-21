@@ -171,22 +171,12 @@ def openai_chat_to_responses_request(payload):
 
     req = {
         'model': payload.get('model', ''),
+        'input': input_items,
         'stream': payload.get('stream', False),
     }
 
     if system_parts:
         req['instructions'] = '\n\n'.join(system_parts)
-
-    # 兼容 chat.completions 场景下直接携带 input
-    if 'input' in payload and payload.get('input') not in (None, '', []):
-        req['input'] = payload.get('input')
-    elif input_items:
-        req['input'] = input_items
-
-    # 仅保留必要字段；不透传前面约定要删除的字段
-    for key in ('conversation_id', 'prompt'):
-        if key in payload and payload.get(key) not in (None, ''):
-            req[key] = payload.get(key)
 
     if 'tools' in payload:
         req['tools'] = _chat_tools_to_responses_tools(payload.get('tools', []))
