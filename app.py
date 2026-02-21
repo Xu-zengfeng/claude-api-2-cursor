@@ -16,6 +16,12 @@ from openai_adapter import (
 
 logger = logging.getLogger(__name__)
 
+# Cursor 模型名 → Anthropic 模型名 映射
+MODEL_MAP = {
+    'claude-4.6-sonnet-medium-thinking': 'claude-sonnet-4-6',
+    'claude-4.6-sonnet-medium': 'claude-sonnet-4-6',
+}
+
 
 def _log_request_exception(tag, e):
     """请求失败时打印完整错误：异常信息、堆栈、以及上游响应体（若有）"""
@@ -89,6 +95,12 @@ def create_app():
             if tc_id:
                 extra += f' tool_call_id={tc_id}'
             logger.info(f'[chat]   msg[{i}] role={role} content={content_info}{extra}')
+
+        # 模型名映射
+        model = payload.get('model', '')
+        if model in MODEL_MAP:
+            payload = {**payload, 'model': MODEL_MAP[model]}
+            logger.info(f'[chat] model mapped: {model} -> {payload["model"]}')
 
         # 转换请求
         anthropic_payload = openai_to_anthropic_request(payload)
