@@ -122,6 +122,7 @@ def create_app():
         is_stream = payload.get('stream', False)
 
         try:
+            logger.info('[passthrough] request body: %s', json.dumps(payload, ensure_ascii=False))
             resp = requests.post(
                 target_url,
                 headers=headers,
@@ -150,6 +151,7 @@ def create_app():
     def _handle_non_stream(target_url, headers, anthropic_payload):
         """处理非流式请求"""
         try:
+            logger.info('[chat] request body: %s', json.dumps(anthropic_payload, ensure_ascii=False))
             resp = requests.post(
                 target_url,
                 headers=headers,
@@ -184,6 +186,7 @@ def create_app():
             init_stream_state(request_id)
             event_type = ''
             try:
+                logger.info('[stream] request body: %s', json.dumps(anthropic_payload, ensure_ascii=False))
                 resp = requests.post(
                     target_url,
                     headers=headers,
