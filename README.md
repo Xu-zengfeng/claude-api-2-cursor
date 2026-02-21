@@ -97,6 +97,8 @@ cp .env.example .env
 ```
 PROXY_TARGET_URL=https://your-relay-station.com
 PROXY_API_KEY=sk-xxx
+CODEX_BASE_URL=
+CODEX_API_KEY=
 PROXY_PORT=3029
 ACCESS_API_KEY=your-access-key
 ```
@@ -105,6 +107,8 @@ ACCESS_API_KEY=your-access-key
 |------|------|--------|
 | `PROXY_TARGET_URL` | Claude 中转站地址 | `https://api.anthropic.com` |
 | `PROXY_API_KEY` | 中转站 API Key | - |
+| `CODEX_BASE_URL` | Codex 专用上游地址（可留空） | 空 |
+| `CODEX_API_KEY` | Codex 专用上游 Key（可留空） | 空 |
 | `PROXY_PORT` | 服务监听端口 | `3029` |
 | `API_TIMEOUT` | 请求超时（秒） | `300` |
 | `ACCESS_API_KEY` | 接入鉴权 Key（为空则不鉴权） | - |

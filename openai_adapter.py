@@ -123,6 +123,153 @@ def openai_to_anthropic_request(payload):
     return result
 
 
+def openai_chat_to_responses_request(payload):
+    """将 Chat Completions 请求转换为 Responses 请求"""
+    input_items = []
+    system_parts = []
+
+    for msg in payload.get('messages', []):
+        role = msg.get('role', '')
+        content = msg.get('content')
+
+        if role == 'system':
+            text = _message_content_to_text(content)
+            if text:
+                system_parts.append(text)
+            continue
+
+        if role in ('user', 'assistant'):
+            message_item = {
+                'type': 'message',
+                'role': role,
+                'content': _message_content_to_responses_content(content, role),
+            }
+            input_items.append(message_item)
+
+            if role == 'assistant':
+                tool_calls = msg.get('tool_calls', [])
+                for tc in tool_calls:
+                    func = tc.get('function', {})
+                    args = func.get('arguments', '{}')
+                    input_items.append({
+                        'type': 'function_call',
+                        'id': tc.get('id', f'call_{uuid.uuid4().hex[:24]}'),
+                        'call_id': tc.get('id', f'call_{uuid.uuid4().hex[:24]}'),
+                        'name': func.get('name', ''),
+                        'arguments': args if isinstance(args, str) else json.dumps(args),
+                    })
+            continue
+
+        if role == 'tool':
+            call_id = msg.get('tool_call_id', '')
+            output = content if isinstance(content, str) else json.dumps(content)
+            input_items.append({
+                'type': 'function_call_output',
+                'call_id': call_id,
+                'output': output,
+            })
+
+    req = {
+        'model': payload.get('model', ''),
+        'input': input_items,
+        'stream': payload.get('stream', False),
+    }
+
+    if system_parts:
+        req['instructions'] = '\n\n'.join(system_parts)
+
+    if 'tools' in payload:
+        req['tools'] = _chat_tools_to_responses_tools(payload.get('tools', []))
+    if 'tool_choice' in payload:
+        req['tool_choice'] = _chat_tool_choice_to_responses(payload.get('tool_choice'))
+
+    if 'max_tokens' in payload:
+        req['max_output_tokens'] = payload.get('max_tokens')
+
+    for key in ('temperature', 'top_p'):
+        if key in payload:
+            req[key] = payload[key]
+
+    return req
+
+
+def _message_content_to_text(content):
+    if content is None:
+        return ''
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get('type', '')
+                if item_type == 'text':
+                    parts.append(item.get('text', ''))
+        return ''.join(parts)
+    return str(content)
+
+
+def _message_content_to_responses_content(content, role):
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{'type': 'input_text', 'text': content}]
+    if not isinstance(content, list):
+        return [{'type': 'input_text', 'text': str(content)}]
+
+    out = []
+    for part in content:
+        if isinstance(part, str):
+            out.append({'type': 'input_text', 'text': part})
+            continue
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get('type', '')
+        if ptype == 'text':
+            text_type = 'output_text' if role == 'assistant' else 'input_text'
+            out.append({'type': text_type, 'text': part.get('text', '')})
+        elif ptype == 'image_url':
+            image_url = part.get('image_url', {})
+            if isinstance(image_url, dict):
+                image_url = image_url.get('url', '')
+            out.append({'type': 'input_image', 'image_url': image_url})
+    return out
+
+
+def _chat_tools_to_responses_tools(tools):
+    out = []
+    if not isinstance(tools, list):
+        return out
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get('type') != 'function':
+            continue
+        func = tool.get('function', {})
+        out.append({
+            'type': 'function',
+            'name': func.get('name', ''),
+            'description': func.get('description', ''),
+            'parameters': func.get('parameters', {'type': 'object', 'properties': {}}),
+        })
+    return out
+
+
+def _chat_tool_choice_to_responses(choice):
+    if isinstance(choice, str):
+        return choice
+    if not isinstance(choice, dict):
+        return choice
+    choice_type = choice.get('type')
+    if choice_type == 'function':
+        func = choice.get('function', {})
+        name = func.get('name') if isinstance(func, dict) else choice.get('name')
+        return {'type': 'function', 'name': name}
+    return choice
+
+
 def _convert_content(msg):
     """转换消息 content 字段"""
     content = msg.get('content', '')
@@ -287,6 +434,77 @@ def anthropic_to_openai_response(response_data, request_id=None):
     }
 
 
+def responses_to_openai_response(response_data, request_id=None):
+    """将 Responses 非流式响应转换为 Chat Completions 响应"""
+    if not request_id:
+        request_id = _gen_id()
+
+    text_parts = []
+    tool_calls = []
+    tool_index = 0
+
+    for item in response_data.get('output', []):
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get('type', '')
+        if item_type == 'message':
+            for content in item.get('content', []):
+                if not isinstance(content, dict):
+                    continue
+                ctype = content.get('type', '')
+                if ctype in ('output_text', 'text'):
+                    text_parts.append(content.get('text', ''))
+        elif item_type == 'function_call':
+            tool_calls.append({
+                'index': tool_index,
+                'id': item.get('call_id') or item.get('id', f'call_{uuid.uuid4().hex[:24]}'),
+                'type': 'function',
+                'function': {
+                    'name': item.get('name', ''),
+                    'arguments': item.get('arguments', ''),
+                },
+            })
+            tool_index += 1
+
+    finish_reason = 'stop'
+    incomplete_reason = (
+        response_data.get('incomplete_details', {}).get('reason', '')
+        if isinstance(response_data.get('incomplete_details'), dict)
+        else ''
+    )
+    if incomplete_reason == 'max_output_tokens':
+        finish_reason = 'length'
+    elif tool_calls:
+        finish_reason = 'tool_calls'
+
+    usage = response_data.get('usage', {})
+    prompt_tokens = usage.get('input_tokens', 0)
+    completion_tokens = usage.get('output_tokens', 0)
+
+    message = {
+        'role': 'assistant',
+        'content': ''.join(text_parts) or None,
+    }
+    if tool_calls:
+        message['tool_calls'] = tool_calls
+
+    return {
+        'id': request_id,
+        'object': 'chat.completion',
+        'model': response_data.get('model', 'unknown'),
+        'choices': [{
+            'index': 0,
+            'message': message,
+            'finish_reason': finish_reason,
+        }],
+        'usage': {
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_tokens': prompt_tokens + completion_tokens,
+        },
+    }
+
+
 # ─── 流式响应转换 ────────────────────────────────────────────
 
 def init_stream_state(request_id):
@@ -392,6 +610,108 @@ def anthropic_to_openai_stream_chunk(event_type, event_data, request_id):
         chunks.append(json.dumps(chunk))
 
     elif event_type == 'message_stop':
+        cleanup_stream_state(request_id)
+
+    return chunks
+
+
+def responses_to_openai_stream_chunk(event_data, request_id):
+    """将 Responses 流式事件转换为 Chat Completions chunk"""
+    if not request_id:
+        request_id = _gen_id()
+
+    state = _STREAM_TOOL_STATE.setdefault(request_id, {
+        'tool_index': -1,
+        'tool_buf': '',
+        'current_tool_id': None,
+        'current_tool_name': None,
+        'input_tokens': 0,
+        'output_tokens': 0,
+        'tool_index_by_id': {},
+        'has_tool_calls': False,
+        'model': 'unknown',
+    })
+    chunks = []
+
+    event_type = event_data.get('type', '')
+
+    if event_type == 'response.created':
+        response = event_data.get('response', {})
+        state['model'] = response.get('model', state.get('model', 'unknown'))
+        chunk = _make_stream_chunk(request_id, delta={'role': 'assistant', 'content': ''})
+        model = state.get('model')
+        if model:
+            chunk['model'] = model
+        chunks.append(json.dumps(chunk))
+
+    elif event_type == 'response.output_item.added':
+        item = event_data.get('item', {})
+        if item.get('type') == 'function_call':
+            state['tool_index'] += 1
+            idx = state['tool_index']
+            call_id = item.get('call_id') or item.get('id', f'call_{uuid.uuid4().hex[:24]}')
+            state['tool_index_by_id'][call_id] = idx
+            state['has_tool_calls'] = True
+            chunk = _make_stream_chunk(request_id, delta={
+                'tool_calls': [{
+                    'index': idx,
+                    'id': call_id,
+                    'type': 'function',
+                    'function': {
+                        'name': item.get('name', ''),
+                        'arguments': '',
+                    },
+                }]
+            })
+            chunk['model'] = state.get('model', 'unknown')
+            chunks.append(json.dumps(chunk))
+
+    elif event_type == 'response.output_text.delta':
+        text = event_data.get('delta', '')
+        if text:
+            chunk = _make_stream_chunk(request_id, delta={'content': text})
+            chunk['model'] = state.get('model', 'unknown')
+            chunks.append(json.dumps(chunk))
+
+    elif event_type == 'response.function_call_arguments.delta':
+        partial = event_data.get('delta', '')
+        item_id = event_data.get('item_id', '')
+        idx = state.get('tool_index_by_id', {}).get(item_id)
+        if partial and idx is not None:
+            chunk = _make_stream_chunk(request_id, delta={
+                'tool_calls': [{
+                    'index': idx,
+                    'function': {'arguments': partial},
+                }]
+            })
+            chunk['model'] = state.get('model', 'unknown')
+            chunks.append(json.dumps(chunk))
+
+    elif event_type == 'response.completed':
+        response = event_data.get('response', {})
+        usage = response.get('usage', {})
+        prompt_tokens = usage.get('input_tokens', 0)
+        completion_tokens = usage.get('output_tokens', 0)
+
+        finish_reason = 'stop'
+        incomplete_reason = (
+            response.get('incomplete_details', {}).get('reason', '')
+            if isinstance(response.get('incomplete_details'), dict)
+            else ''
+        )
+        if incomplete_reason == 'max_output_tokens':
+            finish_reason = 'length'
+        elif state.get('has_tool_calls'):
+            finish_reason = 'tool_calls'
+
+        chunk = _make_stream_chunk(request_id, delta={}, finish_reason=finish_reason)
+        chunk['model'] = state.get('model', 'unknown')
+        chunk['usage'] = {
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_tokens': prompt_tokens + completion_tokens,
+        }
+        chunks.append(json.dumps(chunk))
         cleanup_stream_state(request_id)
 
     return chunks
